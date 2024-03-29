@@ -11,6 +11,7 @@
 #include <fstream>
 #include <vector>
 #include <string>
+#include <iostream>  
 #define USE_ASPECT_RATIO 1
 #define DUMP_FILE 0
 #define USE_MULTICLASS_NMS 1
@@ -100,7 +101,29 @@ void YoloV5::enableProfile(TimeStamp *ts)
 int YoloV5::batch_size() {
   return max_batch;
 };
+int YoloV5::Detect(cv::Mat& images, std::vector<YoloV5BoxVec>& boxes){
+  int ret = 0;
+  //3. preprocess
+  // m_ts->save("yolov5 preprocess", input_images.size());
+  std::cout<<"准备进行推理 pre_process"<<std::endl;
+  ret = pre_process(images);
 
+  CV_Assert(ret == 0);
+  // m_ts->save("yolov5 preprocess", input_images.size());
+
+  //4. forward
+  // m_ts->save("yolov5 inference", input_images.size());
+  ret = m_bmNetwork->forward();
+  CV_Assert(ret == 0);
+  // m_ts->save("yolov5 inference", input_images.size());
+
+  //5. post process
+  // m_ts->save("yolov5 postprocess", input_images.size());
+  ret = post_process(images, boxes);
+  CV_Assert(ret == 0);
+  // m_ts->save("yolov5 postprocess", input_images.size());
+  return ret;
+}
 int YoloV5::Detect(const std::vector<bm_image>& input_images, std::vector<YoloV5BoxVec>& boxes)
 {
   int ret = 0;
@@ -127,6 +150,158 @@ int YoloV5::Detect(const std::vector<bm_image>& input_images, std::vector<YoloV5
   return ret;
 }
 
+int YoloV5::pre_process(cv::Mat& images){
+  std::shared_ptr<BMNNTensor> input_tensor = m_bmNetwork->inputTensor(0);
+  bm_device_mem_t p_dev ;
+  int total=input_tensor->getElementsize()*input_tensor->getDataSize();
+  bm_malloc_device_byte(bm_handle_t(input_tensor->GetHandle()), &p_dev, total);
+  input_tensor->set_device_mem(&p_dev);
+  input_tensor->writeDataToHost([&](cv::Mat& img,float* host,int hostlen){
+      std::cout<<"host:"<<host<<",len="<<hostlen<<std::endl;
+       transMatForNCHW(img, host, false);
+       std::cout<<"pre handle end"<<std::endl;
+  },images);
+    
+    // bm_device_mem_t p_dev ;
+    // bm_malloc_device_byte(bm_handle_t(input_tensor->GetHandle()), &p_dev, total);
+    // void*host;
+    // auto ret =bm_mem_mmap_device_mem(input_tensor->GetHandle(), &p_dev, (unsigned long long*)&host);
+    // transMatForNCHW(images, (float*)host,input_tensor->getElementsize());
+    //  std::cout<<"ret="<<ret<<",inputElementSize="<<total<<std::endl;
+   
+    // ret = bm_mem_unmap_device_mem(input_tensor->GetHandle(), host,total);
+    // if(ret!=BM_SUCCESS){
+    //     std::cout<<"false"<<std::endl;
+    // }
+    //  input_tensor->set_device_mem(&p_dev);
+    //  bm_free_device(input_tensor->GetHandle(),p_dev);
+  return 0;
+}
+int YoloV5::post_process(cv::Mat& images, std::vector<YoloV5BoxVec>& boxes){
+    YoloV5BoxVec yolobox_vec;
+  std::vector<cv::Rect> bbox_vec;
+  std::vector<std::shared_ptr<BMNNTensor>> outputTensors(output_num);
+  for(int i=0; i<output_num; i++){
+      outputTensors[i] = m_bmNetwork->outputTensor(i);
+  }
+int batch_idx = 0;
+    yolobox_vec.clear();
+
+    int tx1 = 0, ty1 = 0;
+
+
+    int min_idx = 0;
+    int box_num = 0;
+    for(int i=0; i<output_num; i++){
+      auto output_shape = m_bmNetwork->outputTensor(i)->get_shape();
+      auto output_dims = output_shape->num_dims;
+      assert(output_dims == 3 || output_dims == 5);
+      if(output_dims == 5){
+        box_num += output_shape->dims[1] * output_shape->dims[2] * output_shape->dims[3];
+      }
+
+      if(min_dim>output_dims){
+        min_idx = i;
+        min_dim = output_dims;
+      }
+    }
+
+    auto out_tensor = outputTensors[min_idx];
+    int nout = out_tensor->get_shape()->dims[min_dim-1];
+    m_class_num = nout - 5;
+
+    float* output_data = nullptr;
+    std::vector<float> decoded_data;
+
+    if(min_dim ==3 && output_num !=1){
+      std::cout<<"--> WARNING: the current bmodel has redundant outputs"<<std::endl;
+      std::cout<<"             you can remove the redundant outputs to improve performance"<< std::endl;
+      std::cout<<std::endl;
+    }
+    
+      LOG_TS(m_ts, "post 1: get output");
+      assert(box_num == 0 || box_num == out_tensor->get_shape()->dims[1]);
+      box_num = out_tensor->get_shape()->dims[1];
+      std::cout<<"debug soph"<<"min_dim="<<min_dim<<",output_num="<<output_num<<",box_num="<<box_num<<std::endl;
+      output_data = (float*)out_tensor->get_cpu_data() + batch_idx*box_num*nout;
+      out_tensor->writeDataToFile(0);
+      LOG_TS(m_ts, "post 1: get output");
+
+    LOG_TS(m_ts, "post 2: filter boxes");
+    int max_wh = 7680;
+    bool agnostic = false;
+    for (int i = 0; i < box_num; i++) {
+      float* ptr = output_data+i*nout;
+      float score = ptr[4];
+      if (score > m_confThreshold) {
+#if USE_MULTICLASS_NMS
+        for (int j = 0; j < m_class_num; j++) {
+          float confidence = ptr[5 + j];
+          int class_id = j;
+          if (confidence * score > m_confThreshold)
+          {
+              float centerX = ptr[0];
+              float centerY = ptr[1];
+              float width = ptr[2];
+              float height = ptr[3];
+
+              YoloV5Box box;
+              if (!agnostic)
+                box.x = centerX - width / 2 + class_id * max_wh;
+              else
+                box.x = centerX - width / 2;
+              if (box.x < 0) box.x = 0;
+              if (!agnostic)
+                box.y = centerY - height / 2 + class_id * max_wh;
+              else
+                box.y = centerY - height / 2;
+              if (box.y < 0) box.y = 0;
+              box.width = width;
+              box.height = height;
+              box.class_id = class_id;
+              box.score = confidence * score;
+              // std::cout<<"w="<<width<<",h="<<height<<",cid="<<class_id<<",score="<<box.score<<std::endl;
+              yolobox_vec.push_back(box);
+          }
+        }
+#else
+        int class_id = argmax(&ptr[5], m_class_num);
+        float confidence = ptr[class_id + 5];
+        if (confidence * score > m_confThreshold)
+        {
+            float centerX = ptr[0];
+            float centerY = ptr[1];
+            float width = ptr[2];
+            float height = ptr[3];
+
+            YoloV5Box box;
+            if (!agnostic)
+              box.x = centerX - width / 2 + class_id * max_wh;
+            else
+              box.x = centerX - width / 2;
+            if (box.x < 0) box.x = 0;
+            if (!agnostic)
+              box.y = centerY - height / 2 + class_id * max_wh;
+            else
+              box.y = centerY - height / 2;
+            if (box.y < 0) box.y = 0;
+            box.width = width;
+            box.height = height;
+            box.class_id = class_id;
+            box.score = confidence * score;
+            
+            yolobox_vec.push_back(box);
+        }
+#endif
+      
+      }
+        boxes.push_back(yolobox_vec);
+    }
+    return 0;
+}
+int YoloV5::post_process_cpu_opt(cv::Mat &images, std::vector<YoloV5BoxVec>& detected_boxes){
+
+}
 int YoloV5::pre_process(const std::vector<bm_image>& images){
   std::shared_ptr<BMNNTensor> input_tensor = m_bmNetwork->inputTensor(0);
   int image_n = images.size();
@@ -209,6 +384,7 @@ int YoloV5::pre_process(const std::vector<bm_image>& images){
   bm_image_get_contiguous_device_mem(image_n, m_converto_imgs.data(), &input_dev_mem);
   input_tensor->set_device_mem(&input_dev_mem);
   input_tensor->set_shape_by_dim(0, image_n);  // set real batch number
+  input_tensor->writeDataToFile(1);
   return 0;
 }
 
@@ -236,8 +412,8 @@ int YoloV5::post_process(const std::vector<bm_image> &images, std::vector<YoloV5
   for(int i=0; i<output_num; i++){
       outputTensors[i] = m_bmNetwork->outputTensor(i);
   }
-  
-  for(int batch_idx = 0; batch_idx < images.size(); ++ batch_idx)
+int batch_idx = 0;
+  for(; batch_idx < images.size(); ++ batch_idx)
   {
     yolobox_vec.clear();
     auto& frame = images[batch_idx];
@@ -283,7 +459,7 @@ int YoloV5::post_process(const std::vector<bm_image> &images, std::vector<YoloV5
       std::cout<<"             you can remove the redundant outputs to improve performance"<< std::endl;
       std::cout<<std::endl;
     }
-
+    
     if(min_dim == 5){
       LOG_TS(m_ts, "post 1: get output and decode");
       // std::cout<<"--> Note: Decoding Boxes"<<std::endl;
@@ -336,7 +512,9 @@ int YoloV5::post_process(const std::vector<bm_image> &images, std::vector<YoloV5
       LOG_TS(m_ts, "post 1: get output");
       assert(box_num == 0 || box_num == out_tensor->get_shape()->dims[1]);
       box_num = out_tensor->get_shape()->dims[1];
+      std::cout<<"debug soph"<<"min_dim="<<min_dim<<",output_num="<<output_num<<",box_num="<<box_num<<std::endl;
       output_data = (float*)out_tensor->get_cpu_data() + batch_idx*box_num*nout;
+      out_tensor->writeDataToFile(0);
       LOG_TS(m_ts, "post 1: get output");
     }
 
@@ -476,8 +654,10 @@ int YoloV5::post_process_cpu_opt(const std::vector<bm_image> &images, std::vecto
     m_class_num = nout - 5;
 #if USE_MULTICLASS_NMS
     int out_nout = nout;
+    std::cout<<"use multiclass_nms"<<std::endl;
 #else
     int out_nout = 7;
+    std::cout<<"NOuse multiclass_nms"<<std::endl;
 #endif
     float transformed_m_confThreshold = - std::log(1 / m_confThreshold - 1);
 
@@ -559,7 +739,7 @@ int YoloV5::post_process_cpu_opt(const std::vector<bm_image> &images, std::vecto
       LOG_TS(m_ts, "post 1: get output");
     }
 
-
+     std::cout<<"debug soph"<<" output elementssize="<<box_num<<",dtype="<< out_tensor->get_dtype()<<",output_data="<<output_data<<std::endl;
     LOG_TS(m_ts, "post 2: filter boxes");
     int max_wh = 7680;
     bool agnostic = false;

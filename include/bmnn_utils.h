@@ -8,13 +8,14 @@
 //===----------------------------------------------------------------------===//
 #ifndef BMNN_H
 #define BMNN_H
-
+#include <fstream>  
 #include <iostream>
 #include <string>
 #include <memory>
-
+#include <functional> 
 #include "bmruntime_interface.h"
 #include "bmruntime_cpp.h"
+
 // #include "bm_wrapper.hpp"
 
 /*
@@ -52,6 +53,7 @@ class BMNNTensor{
   bool can_mmap;
 
   public:
+   bm_handle_t GetHandle(){return m_handle;}
   BMNNTensor(bm_handle_t handle, const char *name, float scale,
       bm_tensor_t* tensor, bool can_mmap):m_handle(handle), m_name(name),
   m_cpu_data(nullptr),m_scale(scale), m_tensor(tensor), can_mmap(can_mmap) {
@@ -73,17 +75,38 @@ class BMNNTensor{
     this->m_tensor->device_mem = *mem;
     return 0;
   }
+  void writeDataToHost(std::function<void(cv::Mat&img,float* host,size_t hostlen)>trans,cv::Mat& img){
+      unsigned long long  addr;
+      int tensor_size = bmruntime::Count(*m_tensor);
+      bm_status_t ret = bm_mem_mmap_device_mem(m_handle, &m_tensor->device_mem, &addr);
+      ret = bm_mem_invalidate_device_mem(m_handle, &m_tensor->device_mem);
+      trans(img,(float*)addr,getElementsize());
+      bm_mem_flush_device_mem(m_handle,&m_tensor->device_mem);
+      ret = bm_mem_unmap_device_mem(m_handle, (void*)addr, getElementsize());
 
+  }
   const bm_device_mem_t* get_device_mem() {
     return &this->m_tensor->device_mem;
   }
-
+  void writeDataToFile(int nT){
+    float* Data=get_cpu_data();
+     int count = bmrt_shape_count(&m_tensor->shape);
+     std::string fileName="binary_data_demo.bin";
+     if(nT==1){
+        fileName="bin_data_input_demo.bin";
+     }
+      std::ofstream file(fileName, std::ios::binary);
+      file.write((char*)Data,count*4);
+      file.close();
+  }
   // Return an array pointer to system memory of tensor.
   float *get_cpu_data() {
     if(m_cpu_data) return m_cpu_data;
     bm_status_t ret;
     float *pFP32 = nullptr;
     int count = bmrt_shape_count(&m_tensor->shape);
+    std::cout<<"debug soph"<<",cout="<<count<<std::endl;
+    
     // in SOC mode, device mem can be mapped to host memory, faster then using d2s
     if(can_mmap){
       if (m_tensor->dtype == BM_FLOAT32) {
@@ -93,6 +116,7 @@ class BMNNTensor{
         ret = bm_mem_invalidate_device_mem(m_handle, &m_tensor->device_mem);
         assert(BM_SUCCESS == ret);
         pFP32 = (float*)addr;
+
       } else if (BM_INT8 == m_tensor->dtype) {
         int8_t * pI8 = nullptr;
         unsigned long long  addr;
@@ -202,7 +226,16 @@ class BMNNTensor{
   int get_num() {
     return m_tensor->shape.dims[0];
   }
-
+  int getElementsize(){
+    int elementsize=1;
+    for(int i=0;i<m_tensor->shape.num_dims;i++){
+      elementsize*=m_tensor->shape.dims[i];
+    }
+    return elementsize;
+  }
+  int getDataSize(){
+    return bmruntime::ByteSize(m_tensor->dtype);
+  }
 };
 
 /*
@@ -224,6 +257,7 @@ class BMNNNetwork : public NoCopyable {
   std::unordered_map<std::string, bm_tensor_t*> m_mapOutputs;
 
   public:
+  bm_handle_t GetHandle(){return m_handle;}
   // Initialize a network for inference, including handle\netinfo\io tensors.
   const bm_net_info_t *m_netinfo;
   BMNNNetwork(void *bmrt, const std::string& name):m_bmrt(bmrt) {
@@ -240,6 +274,7 @@ class BMNNNetwork : public NoCopyable {
     m_batches.insert(batches.begin(), batches.end());
     m_inputTensors = new bm_tensor_t[m_netinfo->input_num];
     m_outputTensors = new bm_tensor_t[m_netinfo->output_num];
+    std::cout<<"debug soph"<<"output_num="<<m_netinfo->output_num;
     for(int i = 0; i < m_netinfo->input_num; ++i) {
       m_inputTensors[i].dtype = m_netinfo->input_dtypes[i];
       m_inputTensors[i].shape = m_netinfo->stages[0].input_shapes[i];

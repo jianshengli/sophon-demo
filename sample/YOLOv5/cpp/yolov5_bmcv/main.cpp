@@ -12,7 +12,7 @@
 #include <unistd.h>
 #include <sys/stat.h>
 #include "json.hpp"
-// #include "opencv2/opencv.hpp"
+#include "opencv2/opencv.hpp"
 #include "ff_decode.hpp"
 #include "yolov5.hpp"
 using json = nlohmann::json;
@@ -84,19 +84,9 @@ int main(int argc, char *argv[]){
   if (access("results/images", 0) != F_OK)
     mkdir("results/images", S_IRWXU);
   
-  // test images
-  if (info.st_mode & S_IFDIR){
     // get files
     vector<string> files_vector;
-    DIR *pDir;
-    struct dirent* ptr;
-    pDir = opendir(input.c_str());
-    while((ptr = readdir(pDir))!=0) {
-        if (strcmp(ptr->d_name, ".") != 0 && strcmp(ptr->d_name, "..") != 0){
-            files_vector.push_back(input + "/" + ptr->d_name);
-        }
-    }
-    closedir(pDir);
+    files_vector.push_back(input);
     std::sort(files_vector.begin(), files_vector.end());
 
     vector<bm_image> batch_imgs;
@@ -107,73 +97,34 @@ int main(int argc, char *argv[]){
     int id = 0;
     for (vector<string>::iterator iter = files_vector.begin(); iter != files_vector.end(); iter++){
       string img_file = *iter; 
-      id++;
-      cout << id << "/" << cn << ", img_file: " << img_file << endl;
-      ts->save("decode time");
-      bm_image bmimg;
-      picDec(h, img_file.c_str(), bmimg);
-      ts->save("decode time");
-      size_t index = img_file.rfind("/");
-      string img_name = img_file.substr(index + 1);
-      batch_imgs.push_back(bmimg);
-      batch_names.push_back(img_name);
-      
-      iter++;
-      bool end_flag = (iter == files_vector.end());
-      iter--;
-      if ((batch_imgs.size() == batch_size || end_flag) && !batch_imgs.empty()) {
-        // predict
-        CV_Assert(0 == yolov5.Detect(batch_imgs, boxes));
+       auto  img = cv::imread(img_file.c_str());
+       cout<<"开始推理前,img.cols="<<img.cols<<",img.rows="<<img.rows<<std::endl;
+      yolov5.Detect(img,boxes);
+       vector<json> bboxes_json;
+          for (auto bbox1 : boxes) {
+            for(auto bbox:bbox1){
+    #if 1
+                cout << "  class id=" << bbox.class_id << ", score = " << bbox.score << " (x=" << bbox.x << ",y=" << bbox.y << ",w=" << bbox.width << ",h=" << bbox.height << ")" << endl;
+    #endif
+    //             // draw image
+    //               yolov5.draw_bmcv(h, bbox.class_id, bbox.score, bbox.x, bbox.y, bbox.width, bbox.height, batch_imgs[i]);
 
-        for(int i = 0; i < batch_imgs.size(); i++){
-          vector<json> bboxes_json;
-        #if WITH_ENCODE
-          if (batch_imgs[i].image_format != 0){
-            bm_image frame;
-            bm_image_create(h, batch_imgs[i].height, batch_imgs[i].width, FORMAT_YUV420P, batch_imgs[i].data_type, &frame);
-            bmcv_image_storage_convert(h, 1, &batch_imgs[i], &frame);
-            bm_image_destroy(batch_imgs[i]);
-            batch_imgs[i] = frame;
-          }
-        #endif
-          for (auto bbox : boxes[i]) {
-#if DEBUG
-            cout << "  class id=" << bbox.class_id << ", score = " << bbox.score << " (x=" << bbox.x << ",y=" << bbox.y << ",w=" << bbox.width << ",h=" << bbox.height << ")" << endl;
-#endif
-            // draw image
-              yolov5.draw_bmcv(h, bbox.class_id, bbox.score, bbox.x, bbox.y, bbox.width, bbox.height, batch_imgs[i]);
+    //             // save result
 
-            // save result
-            json bbox_json;
-            bbox_json["category_id"] = bbox.class_id;
-            bbox_json["score"] = bbox.score;
-            bbox_json["bbox"] = {bbox.x, bbox.y, bbox.width, bbox.height};
-            bboxes_json.push_back(bbox_json);
+                json bbox_json;
+                bbox_json["category_id"] = bbox.class_id;
+                bbox_json["score"] = bbox.score;
+                bbox_json["bbox"] = {bbox.x, bbox.y, bbox.width, bbox.height};
+                bboxes_json.push_back(bbox_json);
+            }
+
           }
           json res_json;
-          res_json["image_name"] = batch_names[i];
+          // res_json["image_name"] = batch_names[i];
           res_json["bboxes"] = bboxes_json;
-          results_json.push_back(res_json);
+          results_json.push_back(res_json);      
 
-          // save image
-        #if WITH_ENCODE
-          void* jpeg_data = NULL;
-          size_t out_size = 0;
-          int ret = bmcv_image_jpeg_enc(h, 1, &batch_imgs[i], &jpeg_data, &out_size);
-          if (ret == BM_SUCCESS) {
-            string img_file = "results/images/" + batch_names[i];
-            FILE *fp = fopen(img_file.c_str(), "wb");
-            fwrite(jpeg_data, out_size, 1, fp);
-            fclose(fp);
-          }
-          free(jpeg_data);
-        #endif
-          bm_image_destroy(batch_imgs[i]);
-        }
-        batch_imgs.clear();
-        batch_names.clear();
-        boxes.clear();
-      }
+
     }
     
     // save results
@@ -189,64 +140,7 @@ int main(int argc, char *argv[]){
     cout << "================" << endl;
     cout << "result saved in " << json_file << endl;
     ofstream(json_file) << std::setw(4) << results_json;
-  }
-  
-  // test video
-  else {
-    VideoDecFFM decoder;
-    decoder.openDec(&h, input.c_str());
-    int id = 0;
-    vector<bm_image> batch_imgs;
-    vector<YoloV5BoxVec> boxes;
-    bool end_flag = false;
-    while(!end_flag){
-      bm_image *img = decoder.grab();
-      if (!img){
-        end_flag=true;
-      }else {
-        batch_imgs.push_back(*img);
-      }
-      if ((batch_imgs.size() == batch_size || end_flag) && !batch_imgs.empty()) {
-        CV_Assert(0 == yolov5.Detect(batch_imgs, boxes));
-        for(int i = 0; i < batch_imgs.size(); i++){
-          id++;
-          cout << id << ", det_nums: " << boxes[i].size() << endl;
-          if (batch_imgs[i].image_format != 0){
-            bm_image frame;
-            bm_image_create(h, batch_imgs[i].height, batch_imgs[i].width, FORMAT_YUV420P, batch_imgs[i].data_type, &frame);
-            bmcv_image_storage_convert(h, 1, &batch_imgs[i], &frame);
-            bm_image_destroy(batch_imgs[i]);
-            batch_imgs[i] = frame;
-          }
-          for (auto bbox : boxes[i]) {
-#if DEBUG
-            cout << "  class id=" << bbox.class_id << ", score = " << bbox.score << " (x=" << bbox.x << ",y=" << bbox.y << ",w=" << bbox.width << ",h=" << bbox.height << ")" << endl;
-#endif
-            yolov5.draw_bmcv(h, bbox.class_id, bbox.score, bbox.x, bbox.y, bbox.width, bbox.height, batch_imgs[i], false);
-          }
-          string img_file = "results/images/" + to_string(id) + ".jpg";
-          void* jpeg_data = NULL;
-          size_t out_size = 0;
-          int ret = bmcv_image_jpeg_enc(h, 1, &batch_imgs[i], &jpeg_data, &out_size);
-          if (ret == BM_SUCCESS) {
-            FILE *fp = fopen(img_file.c_str(), "wb");
-            fwrite(jpeg_data, out_size, 1, fp);
-            fclose(fp);
-          }
-          free(jpeg_data);
-          bm_image_destroy(batch_imgs[i]);
-        }
-        batch_imgs.clear();
-        boxes.clear();
-      }
-    }
-  }
-  // print speed
-  time_stamp_t base_time = time_point_cast<microseconds>(steady_clock::now());
-  yolov5_ts.calbr_basetime(base_time);
-  yolov5_ts.build_timeline("yolov5 test");
-  yolov5_ts.show_summary("yolov5 test");
-  yolov5_ts.clear();
+
 
   return 0;
 }

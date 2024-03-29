@@ -50,6 +50,9 @@ class YoloV5 {
   TimeStamp *m_ts;
 
   private:
+  int pre_process(cv::Mat& images);
+  int post_process(cv::Mat& images, std::vector<YoloV5BoxVec>& boxes);
+  int post_process_cpu_opt(cv::Mat &images, std::vector<YoloV5BoxVec>& detected_boxes);
   int pre_process(const std::vector<bm_image>& images);
   int post_process(const std::vector<bm_image>& images, std::vector<YoloV5BoxVec>& boxes);
   int post_process_cpu_opt(const std::vector<bm_image> &images, std::vector<YoloV5BoxVec>& detected_boxes);
@@ -57,6 +60,26 @@ class YoloV5 {
   static float get_aspect_scaled_ratio(int src_w, int src_h, int dst_w, int dst_h, bool *alignWidth);
   static float sigmoid(float x);
   void NMS(YoloV5BoxVec &dets, float nmsConfidence);
+  inline void transMatForNCHW(const cv::Mat& img, float* host, bool swaprb = false) {
+    size_t total = img.rows * img.cols;    
+    float *bhost, *ghost, *rhost;
+    if (swaprb) {
+        rhost = host;
+        ghost = rhost + total;
+        bhost = ghost + total;
+    } else {
+        bhost = host;
+        ghost = bhost + total;
+        rhost = ghost + total;
+    }
+    const uint8_t* data = (uint8_t*)img.data;
+    int totalprint=1000;
+    for (size_t i = 0; i < total; i++) {
+        *(bhost++) = float(*(data++));
+        *(ghost++) = float(*(data++));
+        *(rhost++) =float(*(data++));
+    }
+}
 
   public:
   YoloV5(std::shared_ptr<BMNNContext> context, bool use_cpu_opt=true);
@@ -64,6 +87,7 @@ class YoloV5 {
   int Init(float confThresh=0.5, float nmsThresh=0.5, const std::string& coco_names_file="");
   void enableProfile(TimeStamp *ts);
   int batch_size();
+  int Detect(cv::Mat& images, std::vector<YoloV5BoxVec>& boxes);
   int Detect(const std::vector<bm_image>& images, std::vector<YoloV5BoxVec>& boxes);
   void drawPred(int classId, float conf, int left, int top, int right, int bottom, cv::Mat& frame);
   void draw_bmcv(bm_handle_t &handle, int classId, float conf, int left, int top, int right, int bottom, bm_image& frame, bool put_text_flag=false);
